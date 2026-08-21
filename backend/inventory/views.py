@@ -6,19 +6,27 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from django.contrib.auth.models import User
 from django.db.models import Sum, Count
 from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
 import tempfile
 import os
 
-from .models import TextileWaste
+from .models import TextileWaste, Notification
 from .serializers import TextileWasteSerializer, RegisterSerializer
 from .permissions import IsRecyclingOperatorOrAdmin, get_user_role
 from .services.image_analysis_service import analyze_textile_image
 from .services.waste_categorization_service import categorize_waste
 from .services.recyclability_scoring_service import calculate_circularity_score
 from .services.material_classification_service import predict_fabric_type
+from .services.recommendation_service import recommend_action
+from .services.environmental_impact_service import estimate_environmental_impact
+from .services.sustainability_service import build_sustainability_summary
 from .services.pdf_report_service import (
     generate_waste_report_pdf,
     generate_batch_waste_report_pdf,
+)
+from .services.excel_report_service import (
+    generate_waste_report_excel,
+    generate_inventory_excel,
 )
 
 
@@ -89,7 +97,7 @@ class MeView(APIView):
 
 class InventorySummaryView(APIView):
     """
-    Inventory monitoring: aggregate totals for the dashboard —
+    Inventory monitoring: aggregate totals for the dashboard --
     total batches, total quantity, and breakdowns by material type
     and status.
     """
@@ -275,11 +283,98 @@ class RecyclabilityAssessmentView(APIView):
         return Response(result)
 
 
+class RecommendationView(APIView):
+    """
+    Recycling Recommendation Engine endpoint (Milestone 3, Task 1).
+
+    Accepts fabric_type, condition, and waste_category, and returns a
+    recommended recycling/reuse action (one of the 7 recycling options
+    from the spec), a plain-language reason, and upcycling ideas when
+    relevant.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        fabric_type = request.data.get('fabric_type')
+        condition = request.data.get('condition')
+        waste_category = request.data.get('waste_category')
+
+        if not fabric_type or not condition or not waste_category:
+            return Response(
+                {"error": "'fabric_type', 'condition', and 'waste_category' are required."},
+                status=400
+            )
+
+        result = recommend_action(
+            fabric_type=fabric_type,
+            condition=condition,
+            waste_category=waste_category,
+        )
+
+        return Response(result)
+
+
+class EnvironmentalImpactView(APIView):
+    """
+    Environmental Impact Assessment Engine endpoint (Milestone 3, Task 2).
+
+    Accepts fabric_type, quantity (kg), and an optional waste_category,
+    and returns estimated CO2 saved, water saved, and landfill diverted.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        fabric_type = request.data.get('fabric_type')
+        quantity = request.data.get('quantity')
+        waste_category = request.data.get('waste_category')
+
+        if not fabric_type or quantity is None:
+            return Response(
+                {"error": "'fabric_type' and 'quantity' are required."},
+                status=400
+            )
+
+        try:
+            quantity = float(quantity)
+        except (TypeError, ValueError):
+            return Response({"error": "'quantity' must be a number."}, status=400)
+
+        result = estimate_environmental_impact(
+            fabric_type=fabric_type,
+            quantity_kg=quantity,
+            waste_category=waste_category,
+        )
+
+        return Response(result)
+
+
+class SustainabilitySummaryView(APIView):
+    """
+    Sustainability Intelligence Engine endpoint (Milestone 3, Task 3).
+
+    Aggregates across the ENTIRE inventory (not a single item) to
+    produce fleet-level metrics: total quantity, waste diversion rate,
+    total environmental impact, a circular-economy category breakdown,
+    and an overall sustainability score. Powers the Sustainability
+    dashboard.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        all_batches = TextileWaste.objects.all()
+        summary = build_sustainability_summary(all_batches)
+        return Response(summary)
+
+
 def _run_full_pipeline(temp_file_path, condition):
     """
-    Shared helper: runs all four engines in sequence and returns the
+    Shared helper: runs all engines in sequence and returns the
     combined report dictionary. Used by both WasteReportView (JSON)
     and WasteReportPDFView (PDF), to avoid duplicating this logic.
+
+    Milestone 3 update: now also runs the recommendation engine and
+    environmental impact engine, chained off the waste category and
+    fabric type produced by the Milestone 2 engines.
     """
     image_analysis = analyze_textile_image(temp_file_path)
     contamination_suspected = image_analysis[
@@ -299,24 +394,33 @@ def _run_full_pipeline(temp_file_path, condition):
         condition=condition,
     )
 
+    recommendation_result = recommend_action(
+        fabric_type=fabric_type,
+        condition=condition,
+        waste_category=waste_category_result.get("waste_category"),
+    )
+
     return {
         "image_analysis": image_analysis,
         "material_classification": material_prediction,
         "waste_categorization": waste_category_result,
         "recyclability_assessment": recyclability_result,
+        "recommendation": recommendation_result,
     }
 
 
 class WasteReportView(APIView):
     """
-    Combined Waste Classification Report endpoint (Milestone 2, Task 5).
+    Combined Waste Classification Report endpoint (Milestone 2, Task 5;
+    extended in Milestone 3 with recommendation output).
 
     Accepts an uploaded image plus a 'condition' field, and returns a
-    single combined JSON report chaining all four engines together:
+    single combined JSON report chaining all engines together:
       1. Image analysis (color, texture, contamination check)
       2. Material classification (predicted fiber type via PyTorch)
       3. Waste categorization (rule-based waste category)
       4. Recyclability assessment (circularity score)
+      5. Recycling recommendation (Milestone 3)
     """
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
@@ -393,6 +497,76 @@ class WasteReportPDFView(APIView):
         return response
 
 
+class WasteReportExcelView(APIView):
+    """
+    Downloadable Excel version of the Combined Waste Classification Report.
+
+    Same inputs as WasteReportView (image + condition), but returns an
+    .xlsx file as an attachment instead of JSON. Fulfills the spec's
+    "Excel export" requirement under Reports & Export System.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        uploaded_file = request.FILES.get('image')
+        condition = request.data.get('condition')
+
+        if not uploaded_file or not condition:
+            return Response(
+                {"error": "Both an 'image' file and 'condition' are required."},
+                status=400
+            )
+
+        validation_error = validate_image_file(uploaded_file)
+        if validation_error:
+            return Response({"error": validation_error}, status=400)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+            for chunk in uploaded_file.chunks():
+                temp_file.write(chunk)
+            temp_file_path = temp_file.name
+
+        try:
+            report_data = _run_full_pipeline(temp_file_path, condition)
+            excel_buffer = generate_waste_report_excel(report_data)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+        finally:
+            os.remove(temp_file_path)
+
+        response = HttpResponse(
+            excel_buffer,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        response['Content-Disposition'] = 'attachment; filename="waste_report.xlsx"'
+        return response
+
+
+class InventoryExcelExportView(APIView):
+    """
+    Full inventory export as Excel: every TextileWaste batch currently
+    in the system, one row per batch. Fulfills the spec's Reports &
+    Export System requirement for a facility-wide Excel export.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        all_batches = TextileWaste.objects.all().order_by('-date_added')
+
+        try:
+            excel_buffer = generate_inventory_excel(all_batches)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+        response = HttpResponse(
+            excel_buffer,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        response['Content-Disposition'] = 'attachment; filename="inventory_export.xlsx"'
+        return response
+
+
 class BatchWasteReportPDFView(APIView):
     """
     Batch analysis endpoint (Milestone 2 extension).
@@ -461,10 +635,10 @@ class BatchWasteReportPDFView(APIView):
 
 class AnalyzeAndLinkToBatchView(APIView):
     """
-    Runs the full Milestone 2 pipeline on an uploaded image and saves
-    the resulting material type, circularity score, and waste category
-    directly onto an existing TextileWaste batch (identified by batch_id).
-    This is what allows Milestone 3's sustainability engine to use real
+    Runs the full pipeline on an uploaded image and saves the resulting
+    material type, circularity score, and waste category directly onto
+    an existing TextileWaste batch (identified by batch_id). This is
+    what allows the Sustainability Intelligence Engine to use real
     AI-generated scores instead of placeholder values.
     """
     permission_classes = [IsAuthenticated]
@@ -511,3 +685,60 @@ class AnalyzeAndLinkToBatchView(APIView):
             "circularity_score": batch.circularity_score,
             "waste_category": batch.waste_category,
         })
+
+
+class NotificationListView(APIView):
+    """
+    Returns the current user's notifications, most recent first
+    (matches the Notification model's default ordering). Powers the
+    notification bell dropdown on the dashboard.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        notifications = Notification.objects.filter(user=request.user)
+        data = [
+            {
+                "id": n.id,
+                "notification_type": n.notification_type,
+                "message": n.message,
+                "related_batch": n.related_batch.batch_id if n.related_batch else None,
+                "is_read": n.is_read,
+                "created_at": n.created_at,
+            }
+            for n in notifications
+        ]
+        return Response(data)
+
+
+class NotificationMarkReadView(APIView):
+    """
+    Marks a single notification as read. Matches the dashboard's
+    PATCH notifications/{id}/ call when a notification is clicked.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        notification = get_object_or_404(
+            Notification, pk=pk, user=request.user
+        )
+        notification.is_read = True
+        notification.save()
+        return Response({
+            "id": notification.id,
+            "is_read": notification.is_read,
+        })
+
+
+class NotificationUnreadCountView(APIView):
+    """
+    Returns just the unread count for the current user, for the
+    notification bell badge.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        count = Notification.objects.filter(
+            user=request.user, is_read=False
+        ).count()
+        return Response({"unread_count": count})

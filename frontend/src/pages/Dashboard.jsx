@@ -1,172 +1,605 @@
-import { useEffect, useState } from "react";
-import {
-    getSustainabilitySummary,
-    getSustainabilityTrends,
-    getCategoryBreakdown,
-    getMaterialRecovery,
-    downloadSustainabilityExcel,
-} from "../services/sustainabilityService";
-import {
-    BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-    LineChart, Line, PieChart, Pie, Cell, ResponsiveContainer,
-} from "recharts";
-import "./SustainabilityDashboard.css";
+import { useState, useEffect } from "react";
+import API from "../services/api";
+import "./Dashboard.css";
 
-const PIE_COLORS = ["#2e7d32", "#c69a3e", "#a85c42", "#506a4d", "#8884d8", "#82ca9d"];
+const MATERIAL_CHOICES = ["Cotton", "Polyester", "Silk", "Wool", "Denim"];
+const CONDITION_CHOICES = [
+    "New Surplus", "Lightly Used", "Worn", "Damaged", "Contaminated",
+];
+const STATUS_CHOICES = [
+    "Registered", "Collected", "In Processing", "Processed",
+];
 
-function SustainabilityDashboard() {
+function Dashboard() {
+    const [image, setImage] = useState(null);
+    const [imageFile, setImageFile] = useState(null);
+    const [prediction, setPrediction] = useState(null);
+    const [predicting, setPredicting] = useState(false);
+    const [downloadingReport, setDownloadingReport] = useState(false);
+    const [batchFiles, setBatchFiles] = useState([]);
+    const [batchProcessing, setBatchProcessing] = useState(false);
+    const [textiles, setTextiles] = useState([]);
     const [summary, setSummary] = useState(null);
-    const [trends, setTrends] = useState(null);
-    const [categoryData, setCategoryData] = useState(null);
-    const [recoveryData, setRecoveryData] = useState(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState(null);
+    const [role, setRole] = useState(null);
+    const [notifications, setNotifications] = useState([]);
+    const [unreadCount, setUnreadCount] = useState(0);
+    const [showNotifDropdown, setShowNotifDropdown] = useState(false);
+    const [form, setForm] = useState({
+        material_type: MATERIAL_CHOICES[0],
+        quantity: "",
+        color: "",
+        source: "",
+        condition: "Worn",
+        status: "Registered",
+        collection_date: "",
+    });
+    const [filters, setFilters] = useState({
+        material: "",
+        source: "",
+        status: "",
+    });
+    const [formError, setFormError] = useState("");
+    const [submitting, setSubmitting] = useState(false);
+
+    const loadTextiles = (activeFilters = filters) => {
+        const params = {};
+        if (activeFilters.material) params.material = activeFilters.material;
+        if (activeFilters.source) params.source = activeFilters.source;
+        if (activeFilters.status) params.status = activeFilters.status;
+
+        API.get("textiles/", { params })
+            .then((response) => setTextiles(response.data))
+            .catch((error) => console.error("Error fetching data:", error));
+    };
+
+    const loadSummary = () => {
+        API.get("inventory-summary/")
+            .then((response) => setSummary(response.data))
+            .catch((error) => console.error("Error fetching summary:", error));
+    };
+
+    const loadNotifications = () => {
+        API.get("notifications/")
+            .then((response) => {
+                setNotifications(response.data);
+                setUnreadCount(response.data.filter((n) => !n.is_read).length);
+            })
+            .catch((error) => console.error("Error fetching notifications:", error));
+    };
 
     useEffect(() => {
-        const fetchData = async () => {
-            try {
-                const [summaryData, trendsData, categoryRes, recoveryRes] = await Promise.all([
-                    getSustainabilitySummary(),
-                    getSustainabilityTrends(),
-                    getCategoryBreakdown(),
-                    getMaterialRecovery(),
-                ]);
-                setSummary(summaryData);
-                setTrends(trendsData);
-                setCategoryData(categoryRes.category_breakdown);
-                setRecoveryData(recoveryRes.material_recovery);
-            } catch (err) {
-                setError("Failed to load sustainability data.");
-            } finally {
-                setLoading(false);
-            }
-        };
-        fetchData();
+        loadTextiles();
+        loadSummary();
+        loadNotifications();
+        API.get("me/")
+            .then((response) => setRole(response.data.role))
+            .catch((error) => console.error("Error fetching profile:", error));
     }, []);
 
-    if (loading) return <p>Loading sustainability data...</p>;
-    if (error) return <p style={{ color: "red" }}>{error}</p>;
+    const markNotificationRead = (id) => {
+        API.patch(`notifications/${id}/`)
+            .then(() => {
+                setNotifications((prev) =>
+                    prev.map((n) => (n.id === id ? { ...n, is_read: true } : n))
+                );
+                setUnreadCount((prev) => Math.max(0, prev - 1));
+            })
+            .catch((error) => console.error("Error marking notification read:", error));
+    };
+
+    const handleImage = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        setImageFile(file);
+        setImage(URL.createObjectURL(file));
+        setPrediction(null);
+    };
+
+    const handlePredict = async () => {
+        if (!imageFile) {
+            alert("Please choose an image first.");
+            return;
+        }
+        const condition = prompt(
+            "Enter condition (e.g. good, fair, damaged):",
+            "good"
+        );
+        if (!condition) return;
+
+        setPredicting(true);
+        setPrediction(null);
+
+        try {
+            const formData = new FormData();
+            formData.append("image", imageFile);
+            formData.append("condition", condition);
+
+            const response = await API.post("waste-report/", formData, {
+                headers: { "Content-Type": "multipart/form-data" },
+            });
+
+            const data = response.data;
+
+            setPrediction({
+                fabric_type: data.material_classification?.predicted_fiber_type,
+                confidence: data.material_classification?.confidence,
+                image_analysis: data.image_analysis,
+                waste_category: data.waste_category,
+                waste_reason: data.waste_reason,
+                recyclability_score: data.recyclability_score,
+                circularity_category: data.circularity_category,
+            });
+        } catch (error) {
+            console.error("Prediction failed:", error);
+            alert(JSON.stringify(error.response?.data) || "Prediction failed.");
+        } finally {
+            setPredicting(false);
+        }
+    };
+
+    const handleDownloadReport = async () => {
+        if (!imageFile) {
+            alert("Please choose an image first.");
+            return;
+        }
+        const condition = prompt(
+            "Enter condition (e.g. good, fair, damaged):",
+            "good"
+        );
+        if (!condition) return;
+
+        setDownloadingReport(true);
+        const formData = new FormData();
+        formData.append("image", imageFile);
+        formData.append("condition", condition);
+
+        try {
+            const response = await API.post("waste-report-pdf/", formData, {
+                headers: { "Content-Type": "multipart/form-data" },
+                responseType: "blob",
+            });
+
+            const url = window.URL.createObjectURL(new Blob([response.data]));
+            const link = document.createElement("a");
+            link.href = url;
+            link.setAttribute("download", "waste_report.pdf");
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (error) {
+            console.error("Report download failed:", error);
+            alert("Could not generate the report.");
+        } finally {
+            setDownloadingReport(false);
+        }
+    };
+
+    const handleBatchFiles = (e) => {
+        const files = Array.from(e.target.files);
+        setBatchFiles(files);
+    };
+
+    const handleBatchDownload = async () => {
+        if (batchFiles.length === 0) {
+            alert("Please choose one or more images first.");
+            return;
+        }
+        const condition = prompt(
+            "Enter condition to apply to ALL images (e.g. good, fair, damaged):",
+            "good"
+        );
+        if (!condition) return;
+
+        setBatchProcessing(true);
+        const formData = new FormData();
+        batchFiles.forEach((file) => formData.append("images", file));
+        formData.append("condition", condition);
+
+        try {
+            const response = await API.post("batch-waste-report-pdf/", formData, {
+                headers: { "Content-Type": "multipart/form-data" },
+                responseType: "blob",
+            });
+
+            const url = window.URL.createObjectURL(new Blob([response.data]));
+            const link = document.createElement("a");
+            link.href = url;
+            link.setAttribute("download", "batch_waste_report.pdf");
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (error) {
+            console.error("Batch report failed:", error);
+            alert("Could not generate the batch report.");
+        } finally {
+            setBatchProcessing(false);
+        }
+    };
+
+    const canManageWaste =
+        role === "Recycling Facility Operator" ||
+        role === "Textile Manufacturer Administrator";
+
+    const updateForm = (field) => (e) =>
+        setForm({ ...form, [field]: e.target.value });
+
+    const updateFilter = (field) => (e) => {
+        const next = { ...filters, [field]: e.target.value };
+        setFilters(next);
+        loadTextiles(next);
+    };
+
+    const handleAddWaste = async (e) => {
+        e.preventDefault();
+        setFormError("");
+        setSubmitting(true);
+        try {
+            await API.post("textiles/", {
+                ...form,
+                quantity: parseFloat(form.quantity),
+                collection_date: form.collection_date || null,
+            });
+            setForm({
+                material_type: MATERIAL_CHOICES[0],
+                quantity: "",
+                color: "",
+                source: "",
+                condition: "Worn",
+                status: "Registered",
+                collection_date: "",
+            });
+            loadTextiles();
+            loadSummary();
+        } catch (error) {
+            setFormError(
+                JSON.stringify(error.response?.data) || "Could not add waste batch."
+            );
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const handleStatusChange = async (id, newStatus) => {
+        try {
+            await API.patch(`textiles/${id}/`, { status: newStatus });
+            loadTextiles();
+            loadSummary();
+        } catch (error) {
+            alert(JSON.stringify(error.response?.data) || "Could not update status.");
+        }
+    };
+
+    const handleDelete = async (id) => {
+        if (!window.confirm("Delete this waste batch? This cannot be undone.")) return;
+        try {
+            await API.delete(`textiles/${id}/`);
+            loadTextiles();
+            loadSummary();
+        } catch (error) {
+            alert(JSON.stringify(error.response?.data) || "Could not delete batch.");
+        }
+    };
 
     return (
-        <div className="sustainability-dashboard">
-            <div className="dash-header-row">
-                <h2>Sustainability Dashboard</h2>
-                <button className="btn-primary" onClick={downloadSustainabilityExcel}>
-                    Download Excel Report
-                </button>
-            </div>
+        <div className="dash-page">
+            <div className="dash-container">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <h1 className="dash-title">Textile waste dashboard</h1>
 
-            <div className="metric-cards">
-                <div className="card">
-                    <h3>Total CO₂ Saved</h3>
-                    <p>{summary.total_co2_saved_kg} kg</p>
-                </div>
-
-                <div className="card">
-                    <h3>Total Water Saved</h3>
-                    <p>{summary.total_water_saved_liters.toLocaleString()} L</p>
-                </div>
-
-                <div className="card">
-                    <h3>Avg. Circularity Score</h3>
-                    <p>{summary.average_circularity_score}%</p>
-                </div>
-
-                <div className="card">
-                    <h3>Waste Diversion Rate</h3>
-                    <p>{summary.waste_diversion_rate_percent}%</p>
-                </div>
-
-                <div className="card">
-                    <h3>Total Batches</h3>
-                    <p>{summary.total_batches}</p>
-                </div>
-
-                <div className="card">
-                    <h3>Processed Batches</h3>
-                    <p>{summary.processed_batches}</p>
-                </div>
-            </div>
-
-            {trends && (
-                <>
-                    <div className="chart-section">
-                        <h3>CO₂ &amp; Water Saved by Material</h3>
-                        <ResponsiveContainer width="100%" height={320}>
-                            <BarChart data={trends.material_breakdown}>
-                                <CartesianGrid strokeDasharray="3 3" />
-                                <XAxis dataKey="material" />
-                                <YAxis />
-                                <Tooltip />
-                                <Legend />
-                                <Bar dataKey="total_co2_saved_kg" fill="#2e7d32" name="CO₂ Saved (kg)" />
-                            </BarChart>
-                        </ResponsiveContainer>
-                    </div>
-
-                    <div className="chart-section">
-                        <h3>CO₂ Saved Over Time</h3>
-                        <ResponsiveContainer width="100%" height={320}>
-                            <LineChart data={trends.monthly_trend}>
-                                <CartesianGrid strokeDasharray="3 3" />
-                                <XAxis dataKey="month" />
-                                <YAxis />
-                                <Tooltip />
-                                <Legend />
-                                <Line
-                                    type="monotone"
-                                    dataKey="total_co2_saved_kg"
-                                    stroke="#2e7d32"
-                                    name="CO₂ Saved (kg)"
-                                />
-                            </LineChart>
-                        </ResponsiveContainer>
-                    </div>
-                </>
-            )}
-
-            {categoryData && categoryData.length > 0 && (
-                <div className="chart-section">
-                    <h3>Waste Category Breakdown</h3>
-                    <ResponsiveContainer width="100%" height={320}>
-                        <PieChart>
-                            <Pie
-                                data={categoryData}
-                                dataKey="total_quantity_kg"
-                                nameKey="waste_category"
-                                cx="50%"
-                                cy="50%"
-                                outerRadius={110}
-                                label={(entry) => `${entry.waste_category} (${entry.total_quantity_kg} kg)`}
-                            >
-                                {categoryData.map((entry, index) => (
-                                    <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                    <div className="notif-bell-wrapper" style={{ position: "relative", display: "inline-block" }}>
+                        <button
+                            className="btn-primary"
+                            onClick={() => setShowNotifDropdown(!showNotifDropdown)}
+                        >
+                            Notifications {unreadCount > 0 && <span className="notif-badge">({unreadCount})</span>}
+                        </button>
+                        {showNotifDropdown && (
+                            <div style={{
+                                position: "absolute", top: "100%", right: 0, background: "#fff",
+                                border: "1px solid #ddd", borderRadius: "8px", width: "320px",
+                                maxHeight: "360px", overflowY: "auto", zIndex: 10, padding: "0.5rem",
+                                boxShadow: "0 4px 12px rgba(0,0,0,0.1)"
+                            }}>
+                                {notifications.length === 0 && (
+                                    <div style={{ padding: "0.75rem", color: "#888" }}>No notifications yet.</div>
+                                )}
+                                {notifications.map((n) => (
+                                    <div
+                                        key={n.id}
+                                        onClick={() => markNotificationRead(n.id)}
+                                        style={{
+                                            padding: "0.6rem", borderBottom: "1px solid #eee",
+                                            cursor: "pointer", background: n.is_read ? "#fff" : "#f0f7ff",
+                                        }}
+                                    >
+                                        <div style={{ fontWeight: n.is_read ? "normal" : "bold", fontSize: "0.9rem" }}>
+                                            {n.message}
+                                        </div>
+                                        <div style={{ fontSize: "0.75rem", color: "#888" }}>
+                                            {new Date(n.created_at).toLocaleString()}
+                                        </div>
+                                    </div>
                                 ))}
-                            </Pie>
-                            <Tooltip />
-                            <Legend />
-                        </PieChart>
-                    </ResponsiveContainer>
+                            </div>
+                        )}
+                    </div>
                 </div>
-            )}
 
-            {recoveryData && recoveryData.length > 0 && (
-                <div className="chart-section">
-                    <h3>Material Recovery Rate</h3>
-                    <ResponsiveContainer width="100%" height={320}>
-                        <BarChart data={recoveryData}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="material" />
-                            <YAxis unit="%" />
-                            <Tooltip />
-                            <Legend />
-                            <Bar dataKey="recovery_rate_percent" fill="#506a4d" name="Recovery Rate (%)" />
-                        </BarChart>
-                    </ResponsiveContainer>
+                <p className="dash-subtitle">
+                    Classify incoming waste and manage your inventory.
+                </p>
+
+                <div className="dash-card">
+                    <h3>Image analysis</h3>
+                    <div className="upload-row">
+                        <label className="file-input-label">
+                            Choose image
+                            <input
+                                type="file"
+                                accept="image/*"
+                                onChange={handleImage}
+                                style={{ display: "none" }}
+                            />
+                        </label>
+                        {image && (
+                            <img src={image} alt="Preview" className="preview-img" />
+                        )}
+                        <button
+                            className="btn-primary"
+                            onClick={handlePredict}
+                            disabled={predicting}
+                        >
+                            {predicting ? "Analyzing..." : "Predict"}
+                        </button>
+                        <button
+                            className="btn-primary"
+                            onClick={handleDownloadReport}
+                            disabled={downloadingReport}
+                        >
+                            {downloadingReport ? "Generating..." : "Download Report (PDF)"}
+                        </button>
+                    </div>
+
+                    {prediction && (
+                        <div className="prediction-result">
+                            <div className="fabric-name-banner">
+                                <span className="fabric-name-label">Predicted Fabric</span>
+                                <span className="fabric-name-value">
+                                    {prediction.fabric_type}
+                                </span>
+                                <span className="fabric-name-confidence">
+                                    {prediction.confidence}% confidence
+                                </span>
+                            </div>
+
+                            {Object.entries(prediction)
+                                .filter(([key]) => key !== "fabric_type" && key !== "confidence")
+                                .map(([key, value]) => (
+                                    <div key={key} style={{ marginBottom: "0.75rem" }}>
+                                        <h4 style={{ marginBottom: "0.25rem" }}>{key}</h4>
+                                        {typeof value === "object" && value !== null ? (
+                                            Object.entries(value).map(([subKey, subValue]) => (
+                                                <div className="breakdown-row" key={subKey}>
+                                                    <span>{subKey}</span>
+                                                    <span>{String(subValue)}</span>
+                                                </div>
+                                            ))
+                                        ) : (
+                                            <div className="breakdown-row">
+                                                <span>{String(value)}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
+                        </div>
+                    )}
                 </div>
-            )}
+
+                <div className="dash-card">
+                    <h3>Batch analysis</h3>
+                    <p className="batch-hint">
+                        Select multiple images to analyze them all at once and
+                        download one combined, shareable PDF report.
+                    </p>
+                    <div className="upload-row">
+                        <label className="file-input-label">
+                            Choose images
+                            <input
+                                type="file"
+                                accept="image/*"
+                                multiple
+                                onChange={handleBatchFiles}
+                                style={{ display: "none" }}
+                            />
+                        </label>
+                        {batchFiles.length > 0 && (
+                            <span className="batch-file-count">
+                                {batchFiles.length} image{batchFiles.length > 1 ? "s" : ""} selected
+                            </span>
+                        )}
+                        <button
+                            className="btn-primary"
+                            onClick={handleBatchDownload}
+                            disabled={batchProcessing}
+                        >
+                            {batchProcessing
+                                ? "Processing batch..."
+                                : "Analyze Batch & Download PDF"}
+                        </button>
+                    </div>
+                </div>
+
+                {summary && (
+                    <div className="dash-card">
+                        <h3>Inventory monitoring</h3>
+                        <div className="summary-stats">
+                            <div className="stat-box">
+                                <span className="stat-number">{summary.total_batches}</span>
+                                <span className="stat-label">Total batches</span>
+                            </div>
+                            <div className="stat-box">
+                                <span className="stat-number">{summary.total_quantity} kg</span>
+                                <span className="stat-label">Total quantity</span>
+                            </div>
+                        </div>
+                        <div className="summary-breakdown">
+                            <div>
+                                <h4>By material</h4>
+                                {summary.by_material.map((row) => (
+                                    <div className="breakdown-row" key={row.material_type}>
+                                        <span>{row.material_type}</span>
+                                        <span>{row.quantity} kg ({row.count})</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <div>
+                                <h4>By status</h4>
+                                {summary.by_status.map((row) => (
+                                    <div className="breakdown-row" key={row.status}>
+                                        <span>{row.status}</span>
+                                        <span>{row.quantity} kg ({row.count})</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {canManageWaste && (
+                    <div className="dash-card">
+                        <h3>Register new waste batch</h3>
+                        {formError && <div className="form-error">{formError}</div>}
+                        <form onSubmit={handleAddWaste}>
+                            <div className="form-grid">
+                                <select
+                                    value={form.material_type}
+                                    onChange={updateForm("material_type")}
+                                >
+                                    {MATERIAL_CHOICES.map((m) => (
+                                        <option key={m} value={m}>{m}</option>
+                                    ))}
+                                </select>
+                                <input
+                                    type="number"
+                                    step="0.1"
+                                    placeholder="Quantity (kg)"
+                                    value={form.quantity}
+                                    onChange={updateForm("quantity")}
+                                    required
+                                />
+                                <input
+                                    type="text"
+                                    placeholder="Color"
+                                    value={form.color}
+                                    onChange={updateForm("color")}
+                                    required
+                                />
+                                <input
+                                    type="text"
+                                    placeholder="Source"
+                                    value={form.source}
+                                    onChange={updateForm("source")}
+                                    required
+                                />
+                                <select
+                                    value={form.condition}
+                                    onChange={updateForm("condition")}
+                                >
+                                    {CONDITION_CHOICES.map((c) => (
+                                        <option key={c} value={c}>{c}</option>
+                                    ))}
+                                </select>
+                                <select
+                                    value={form.status}
+                                    onChange={updateForm("status")}
+                                >
+                                    {STATUS_CHOICES.map((s) => (
+                                        <option key={s} value={s}>{s}</option>
+                                    ))}
+                                </select>
+                                <input
+                                    type="date"
+                                    value={form.collection_date}
+                                    onChange={updateForm("collection_date")}
+                                />
+                            </div>
+                            <button className="btn-primary" type="submit" disabled={submitting}>
+                                {submitting ? "Saving..." : "Add waste batch"}
+                            </button>
+                        </form>
+                    </div>
+                )}
+
+                <div className="dash-card">
+                    <h3>Textile inventory</h3>
+
+                    <div className="filter-row">
+                        <select value={filters.material} onChange={updateFilter("material")}>
+                            <option value="">All materials</option>
+                            {MATERIAL_CHOICES.map((m) => (
+                                <option key={m} value={m}>{m}</option>
+                            ))}
+                        </select>
+                        <select value={filters.status} onChange={updateFilter("status")}>
+                            <option value="">All statuses</option>
+                            {STATUS_CHOICES.map((s) => (
+                                <option key={s} value={s}>{s}</option>
+                            ))}
+                        </select>
+                        <input
+                            type="text"
+                            placeholder="Filter by source..."
+                            value={filters.source}
+                            onChange={updateFilter("source")}
+                        />
+                    </div>
+
+                    {textiles.length === 0 && (
+                        <div className="empty-note">No waste batches match your filters.</div>
+                    )}
+                    <ul className="batch-list">
+                        {textiles.map((item) => (
+                            <li key={item.id} className="batch-item">
+                                <span className="batch-id-chip">{item.batch_id}</span>
+                                <span>{item.material_type}</span>
+                                <span>{item.quantity} kg</span>
+                                <span>{item.color}</span>
+                                <span>{item.source}</span>
+                                <span>{item.condition}</span>
+                                {item.collection_date && (
+                                    <span>collected {item.collection_date}</span>
+                                )}
+
+                                {canManageWaste ? (
+                                    <>
+                                        <select
+                                            className="status-select"
+                                            value={item.status}
+                                            onChange={(e) => handleStatusChange(item.id, e.target.value)}
+                                        >
+                                            {STATUS_CHOICES.map((s) => (
+                                                <option key={s} value={s}>{s}</option>
+                                            ))}
+                                        </select>
+                                        <button
+                                            className="btn-delete"
+                                            onClick={() => handleDelete(item.id)}
+                                        >
+                                            Delete
+                                        </button>
+                                    </>
+                                ) : (
+                                    <span className="status-chip">{item.status}</span>
+                                )}
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            </div>
         </div>
     );
 }
 
-export default SustainabilityDashboard;
+export default Dashboard;
