@@ -1,68 +1,172 @@
-import { useState, useEffect } from "react";
-import API from "../services/api";
+import { useEffect, useState } from "react";
+import {
+    getSustainabilitySummary,
+    getSustainabilityTrends,
+    getCategoryBreakdown,
+    getMaterialRecovery,
+    downloadSustainabilityExcel,
+} from "../services/sustainabilityService";
+import {
+    BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+    LineChart, Line, PieChart, Pie, Cell, ResponsiveContainer,
+} from "recharts";
+import "./SustainabilityDashboard.css";
 
-function Dashboard() {
-    const [image, setImage] = useState(null);
-    const [textiles, setTextiles] = useState([]);
+const PIE_COLORS = ["#2e7d32", "#c69a3e", "#a85c42", "#506a4d", "#8884d8", "#82ca9d"];
 
-    const handleImage = (e) => {
-        setImage(URL.createObjectURL(e.target.files[0]));
-    };
+function SustainabilityDashboard() {
+    const [summary, setSummary] = useState(null);
+    const [trends, setTrends] = useState(null);
+    const [categoryData, setCategoryData] = useState(null);
+    const [recoveryData, setRecoveryData] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
 
     useEffect(() => {
-        API.get("textiles/")
-            .then((response) => {
-                setTextiles(response.data);
-            })
-            .catch((error) => {
-                console.error("Error fetching data:", error);
-            });
+        const fetchData = async () => {
+            try {
+                const [summaryData, trendsData, categoryRes, recoveryRes] = await Promise.all([
+                    getSustainabilitySummary(),
+                    getSustainabilityTrends(),
+                    getCategoryBreakdown(),
+                    getMaterialRecovery(),
+                ]);
+                setSummary(summaryData);
+                setTrends(trendsData);
+                setCategoryData(categoryRes.category_breakdown);
+                setRecoveryData(recoveryRes.material_recovery);
+            } catch (err) {
+                setError("Failed to load sustainability data.");
+            } finally {
+                setLoading(false);
+            }
+        };
+        fetchData();
     }, []);
 
+    if (loading) return <p>Loading sustainability data...</p>;
+    if (error) return <p style={{ color: "red" }}>{error}</p>;
+
     return (
-        <div className="dashboard">
+        <div className="sustainability-dashboard">
+            <div className="dash-header-row">
+                <h2>Sustainability Dashboard</h2>
+                <button className="btn-primary" onClick={downloadSustainabilityExcel}>
+                    Download Excel Report
+                </button>
+            </div>
 
-            <h1>Textile Waste Classification</h1>
+            <div className="metric-cards">
+                <div className="card">
+                    <h3>Total CO₂ Saved</h3>
+                    <p>{summary.total_co2_saved_kg} kg</p>
+                </div>
 
-            <p>Select a textile waste image for AI analysis.</p>
+                <div className="card">
+                    <h3>Total Water Saved</h3>
+                    <p>{summary.total_water_saved_liters.toLocaleString()} L</p>
+                </div>
 
-            <input
-                type="file"
-                accept="image/*"
-                onChange={handleImage}
-            />
+                <div className="card">
+                    <h3>Avg. Circularity Score</h3>
+                    <p>{summary.average_circularity_score}%</p>
+                </div>
 
-            <br /><br />
+                <div className="card">
+                    <h3>Waste Diversion Rate</h3>
+                    <p>{summary.waste_diversion_rate_percent}%</p>
+                </div>
 
-            {image && (
-                <img
-                    src={image}
-                    alt="Preview"
-                    className="preview"
-                />
+                <div className="card">
+                    <h3>Total Batches</h3>
+                    <p>{summary.total_batches}</p>
+                </div>
+
+                <div className="card">
+                    <h3>Processed Batches</h3>
+                    <p>{summary.processed_batches}</p>
+                </div>
+            </div>
+
+            {trends && (
+                <>
+                    <div className="chart-section">
+                        <h3>CO₂ &amp; Water Saved by Material</h3>
+                        <ResponsiveContainer width="100%" height={320}>
+                            <BarChart data={trends.material_breakdown}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="material" />
+                                <YAxis />
+                                <Tooltip />
+                                <Legend />
+                                <Bar dataKey="total_co2_saved_kg" fill="#2e7d32" name="CO₂ Saved (kg)" />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+
+                    <div className="chart-section">
+                        <h3>CO₂ Saved Over Time</h3>
+                        <ResponsiveContainer width="100%" height={320}>
+                            <LineChart data={trends.monthly_trend}>
+                                <CartesianGrid strokeDasharray="3 3" />
+                                <XAxis dataKey="month" />
+                                <YAxis />
+                                <Tooltip />
+                                <Legend />
+                                <Line
+                                    type="monotone"
+                                    dataKey="total_co2_saved_kg"
+                                    stroke="#2e7d32"
+                                    name="CO₂ Saved (kg)"
+                                />
+                            </LineChart>
+                        </ResponsiveContainer>
+                    </div>
+                </>
             )}
 
-            <br /><br />
+            {categoryData && categoryData.length > 0 && (
+                <div className="chart-section">
+                    <h3>Waste Category Breakdown</h3>
+                    <ResponsiveContainer width="100%" height={320}>
+                        <PieChart>
+                            <Pie
+                                data={categoryData}
+                                dataKey="total_quantity_kg"
+                                nameKey="waste_category"
+                                cx="50%"
+                                cy="50%"
+                                outerRadius={110}
+                                label={(entry) => `${entry.waste_category} (${entry.total_quantity_kg} kg)`}
+                            >
+                                {categoryData.map((entry, index) => (
+                                    <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                                ))}
+                            </Pie>
+                            <Tooltip />
+                            <Legend />
+                        </PieChart>
+                    </ResponsiveContainer>
+                </div>
+            )}
 
-            <button>Predict</button>
-
-            <hr />
-
-            <h2>Textile Inventory</h2>
-
-            <ul>
-                {textiles.map((item) => (
-                    <li key={item.id}>
-                        <strong>{item.material_type}</strong> -
-                        {item.quantity} kg -
-                        {item.color} -
-                        {item.source}
-                    </li>
-                ))}
-            </ul>
-
+            {recoveryData && recoveryData.length > 0 && (
+                <div className="chart-section">
+                    <h3>Material Recovery Rate</h3>
+                    <ResponsiveContainer width="100%" height={320}>
+                        <BarChart data={recoveryData}>
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="material" />
+                            <YAxis unit="%" />
+                            <Tooltip />
+                            <Legend />
+                            <Bar dataKey="recovery_rate_percent" fill="#506a4d" name="Recovery Rate (%)" />
+                        </BarChart>
+                    </ResponsiveContainer>
+                </div>
+            )}
         </div>
     );
 }
 
-export default Dashboard;
+export default SustainabilityDashboard;
