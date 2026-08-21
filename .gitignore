@@ -1,16 +1,20 @@
 # Python
 backend/venv/
-backend/__pycache__/
+__pycache__/
 *.pyc
 db.sqlite3
 
 # Node
 frontend/node_modules/
+frontend/dist/
+dist/
 
 # Environment
 .env
 
 # VS Code
 .vscode/
+
+# Project-specific
 dataset/
 AI-Textile-Waste-Intelligence-Platform/
